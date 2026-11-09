@@ -1,0 +1,7 @@
+data/raw/
+data/text/
+data/prompts/
+*.pyc
+__pycache__/
+.env
+.venv/
