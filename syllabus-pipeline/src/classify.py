@@ -52,6 +52,7 @@ SCHEMA = {
                             "proctored_exams", "writing", "studying_learning"]},
             "required": ["homework", "projects", "take_home_exams",
                          "proctored_exams", "writing", "studying_learning"],
+            "additionalProperties": False,
         },
         "citation_required": {"type": "boolean",
                               "description": "Students must cite or disclose AI use."},
@@ -77,7 +78,8 @@ SCHEMA = {
                     "homework", "project", "lab", "quiz", "proctored_exam",
                     "take_home_exam", "participation", "other"]},
                 "percent": {"type": "number"}},
-                "required": ["component", "category", "percent"]},
+                "required": ["component", "category", "percent"],
+                "additionalProperties": False},
         },
         "evidence_quote": {"type": "string",
                            "description": "Shortest verbatim excerpt (<= 60 words) supporting ai_policy; empty if none."},
@@ -86,6 +88,7 @@ SCHEMA = {
     "required": ["ai_policy", "scope", "citation_required", "detection_mentioned",
                  "stance", "implications", "tools_named", "ai_is_course_content",
                  "assessment_weights", "evidence_quote", "confidence"],
+    "additionalProperties": False,
 }
 
 SYSTEM = """You code university course syllabi for a research study on generative-AI \
@@ -128,28 +131,38 @@ def build_input(secs: list[dict]) -> str:
 
 
 def classify(client, row: dict, text: str) -> dict:
+    import anthropic
     user = (f"Course: {row['course']}  Term: {row['term']}\n\n"
             f"Relevant syllabus sections:\n<syllabus>\n{text}\n</syllabus>\n\n"
-            "Record the coding with the record_coding tool.")
+            "Return the coding as JSON.")
     for attempt in range(4):
         try:
             resp = client.messages.create(
-                model=MODEL, max_tokens=2000, temperature=0, system=SYSTEM,
-                tools=[{"name": "record_coding", "description": "Record the syllabus coding.",
-                        "input_schema": SCHEMA}],
-                tool_choice={"type": "tool", "name": "record_coding"},
+                model=MODEL, max_tokens=4000, system=SYSTEM,
+                output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
                 messages=[{"role": "user", "content": user}],
             )
-            for block in resp.content:
-                if block.type == "tool_use":
-                    return block.input
-            raise RuntimeError("model returned no tool call")
-        except Exception as e:
+            if resp.stop_reason == "max_tokens":
+                raise RuntimeError("output cut off at max_tokens; raise max_tokens")
+            text = next(b.text for b in resp.content if b.type == "text")
+            return normalize(json.loads(text))
+        except (anthropic.RateLimitError, anthropic.APIConnectionError,
+                anthropic.InternalServerError) as e:  # only retry transient errors
             if attempt == 3:
                 raise
             wait = 2 ** attempt * 5
             print(f"  retry in {wait}s ({e})")
             time.sleep(wait)
+
+
+def normalize(lab: dict) -> dict:
+    for k in ["ai_policy", "stance", "confidence"]:
+        lab[k] = str(lab[k]).strip().lower()
+    lab["scope"] = {k: str(v).strip().lower() for k, v in lab["scope"].items()}
+    lab["implications"] = [str(v).strip().lower() for v in lab["implications"]]
+    for w in lab["assessment_weights"]:
+        w["category"] = str(w["category"]).strip().lower()
+    return lab
 
 
 def flatten(rec: dict) -> dict:
